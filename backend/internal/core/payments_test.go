@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func testPass() string { return "fake-test-pass-12345" }
 
 func TestVerifyCryptoAcceptsSolanaSPLTransfer(t *testing.T) {
 	signature := base58Encode(bytes.Repeat([]byte{1}, 64))
@@ -221,6 +225,30 @@ func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
 }
 
+// newPaymentsWithStripeLookupMock returns a PaymentManager whose HTTP client
+// answers Stripe PaymentIntent lookups locally, so tests never call the live
+// Stripe API. The lookup echoes the requested intent id back as succeeded.
+func newPaymentsWithStripeLookupMock(cfg Config) *PaymentManager {
+	payments := NewPaymentManager(cfg)
+	payments.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet || req.URL.Host != "api.stripe.com" || !strings.HasPrefix(req.URL.Path, "/v1/payment_intents/") {
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":"unexpected request"}`)),
+			}, nil
+		}
+		intentID := strings.TrimPrefix(req.URL.Path, "/v1/payment_intents/")
+		body := fmt.Sprintf(`{"id":%q,"status":"succeeded","currency":"usd","amount":100000,"amount_received":100000}`, intentID)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+	return payments
+}
+
 func newPayPalCreateOrderServer(t *testing.T, orderID string, onCreate func(*http.Request, map[string]any)) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +300,7 @@ func TestStripeWebhookPaymentSucceededRecordsLedgerEntry(t *testing.T) {
 		BountyRoot:           filepath.Join(tempDir, "bounties"),
 		SMTPFrom:             "noreply@mergeos.local",
 	}
-	payments := NewPaymentManager(cfg)
+	payments := newPaymentsWithStripeLookupMock(cfg)
 	store, err := NewStore(cfg, payments, NewRepoFactory(cfg), NewEmailSender(cfg))
 	if err != nil {
 		t.Fatal(err)
@@ -354,7 +382,7 @@ func TestStripeWebhookPaymentFailedMarksProjectFailed(t *testing.T) {
 		BountyRoot:           filepath.Join(tempDir, "bounties"),
 		SMTPFrom:             "noreply@mergeos.local",
 	}
-	payments := NewPaymentManager(cfg)
+	payments := newPaymentsWithStripeLookupMock(cfg)
 	store, err := NewStore(cfg, payments, NewRepoFactory(cfg), NewEmailSender(cfg))
 	if err != nil {
 		t.Fatal(err)
@@ -421,7 +449,7 @@ func TestStripeWebhookPaymentRefundedMarksProjectRefunded(t *testing.T) {
 		BountyRoot:           filepath.Join(tempDir, "bounties"),
 		SMTPFrom:             "noreply@mergeos.local",
 	}
-	payments := NewPaymentManager(cfg)
+	payments := newPaymentsWithStripeLookupMock(cfg)
 	store, err := NewStore(cfg, payments, NewRepoFactory(cfg), NewEmailSender(cfg))
 	if err != nil {
 		t.Fatal(err)
@@ -488,7 +516,7 @@ func TestStripeWebhookPaymentSucceededDuplicateEvent(t *testing.T) {
 		BountyRoot:           filepath.Join(tempDir, "bounties"),
 		SMTPFrom:             "noreply@mergeos.local",
 	}
-	payments := NewPaymentManager(cfg)
+	payments := newPaymentsWithStripeLookupMock(cfg)
 	store, err := NewStore(cfg, payments, NewRepoFactory(cfg), NewEmailSender(cfg))
 	if err != nil {
 		t.Fatal(err)
@@ -543,6 +571,4 @@ func TestStripeWebhookPaymentSucceededDuplicateEvent(t *testing.T) {
 		t.Fatalf("expected project %s, got %s", project.ID, second.ProjectID)
 	}
 }
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
 

@@ -195,6 +195,9 @@ func stripeWebhookLedgerEntryMatches(entry LedgerEntry, eventID string, payment 
 	if entry.Type != "payment_verified" || !strings.EqualFold(entry.FromAccount, "payment:stripe") {
 		return false
 	}
+	if !strings.Contains(entry.Reference, "stripe_pi:") {
+		return false
+	}
 	for _, id := range []string{strings.TrimSpace(eventID), payment.PaymentIntentID} {
 		if id != "" && ledgerValueReferencesID(entry.Reference, id) {
 			return true
